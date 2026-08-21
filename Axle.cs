@@ -12,7 +12,9 @@ public class Axle : MonoBehaviour {
 	}
 	public float AngularVelocity {
 		get {
-			return Mathf.Min (TireLeft.AngularVelocity + TireRight.AngularVelocity);
+			// Был: return Mathf.Min (TireLeft.AngularVelocity + TireRight.AngularVelocity);
+			// Исправлено: усредняем угловую скорость обоих колёс
+			return (TireLeft.AngularVelocity + TireRight.AngularVelocity) / 2f;
 		}
 	}
 	public float Torque {
