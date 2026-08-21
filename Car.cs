@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using System.Collections.Generic;
 
 public class Car : MonoBehaviour {
@@ -80,6 +80,15 @@ public class Car : MonoBehaviour {
 	[Range(0f, 10f)]
 	float AxleDistanceCorrection = 2f;
 
+	// --- New params for kinematic/dynamic blending
+	[SerializeField]
+	[Tooltip("Ниже этой скорости — преимущественно кinematic bicycle моделирование")]
+	float KinematicModeSpeed = 0.5f; // m/s
+
+	[SerializeField]
+	[Tooltip("Ширина линейного бленда в м/с")]
+	float KinematicBlendRange = 2.0f; // m/s
+
 	public float SpeedKilometersPerHour {
 		get {
 			return Rigidbody2D.velocity.magnitude * 18f / 5f;
@@ -115,6 +124,10 @@ public class Car : MonoBehaviour {
 
 	GameObject CenterOfGravity;
 	GameObject CameraView;
+
+	// Debug values updated in FixedUpdate for OnDrawGizmos
+	float debugDynamicBlend = 0f;
+	float debugYawRateKinematic = 0f;
 
 	void Awake() {
 
@@ -204,7 +217,6 @@ public class Car : MonoBehaviour {
 			AxleFront.TireLeft.transform.localRotation = Quaternion.Euler(0, 0, Mathf.Rad2Deg * SteerAngle);
 		}			
 
-
 		// Calculate weight center of four tires
 		// This is just to draw that red dot over the car to indicate what tires have the most weight
 		Vector2 pos = Vector2.zero;
@@ -280,21 +292,25 @@ public class Car : MonoBehaviour {
 		AxleRear.TireLeft.ActiveWeight = weightRear - transferY;
 		AxleRear.TireRight.ActiveWeight = weightRear + transferY;
 			
-		// Velocity of each tire
+		// Velocity of each tire (these are approximations for rotational velocity contribution)
 		AxleFront.TireLeft.AngularVelocity = AxleFront.DistanceToCG * AngularVelocity;
 		AxleFront.TireRight.AngularVelocity = AxleFront.DistanceToCG * AngularVelocity;
 		AxleRear.TireLeft.AngularVelocity = -AxleRear.DistanceToCG * AngularVelocity;
 		AxleRear.TireRight.AngularVelocity = -AxleRear.DistanceToCG *  AngularVelocity;
 
 		// Slip angle
-		AxleFront.SlipAngle = Mathf.Atan2(LocalVelocity.y + AxleFront.AngularVelocity, Mathf.Abs(LocalVelocity.x)) - Mathf.Sign(LocalVelocity.x) * SteerAngle;
-		AxleRear.SlipAngle = Mathf.Atan2(LocalVelocity.y + AxleRear.AngularVelocity,  Mathf.Abs(LocalVelocity.x));
+		// Protect against division by very small forward velocity: use min forward speed or rely on kinematic/dynamic blend
+		float minLongVel = 0.5f;
+		float denom = Mathf.Max(Mathf.Abs(LocalVelocity.x), minLongVel);
+
+		AxleFront.SlipAngle = Mathf.Atan2(LocalVelocity.y + AxleFront.AngularVelocity, denom) - Mathf.Sign(LocalVelocity.x) * SteerAngle;
+		AxleRear.SlipAngle = Mathf.Atan2(LocalVelocity.y + AxleRear.AngularVelocity, denom);
 
 		// Brake and Throttle power
 		float activeBrake = Mathf.Min(Brake * BrakePower + EBrake * EBrakePower, BrakePower);
 		float activeThrottle = (Throttle * Engine.GetTorque (Rigidbody2D)) * (Engine.GearRatio * Engine.EffectiveGearRatio);
 
-		// Torque of each tire (rear wheel drive)
+		// Torque of each tire (rear wheel drive assumed)
 		AxleRear.TireLeft.Torque = activeThrottle / AxleRear.TireLeft.Radius;
 		AxleRear.TireRight.Torque = activeThrottle / AxleRear.TireRight.Radius;
 
@@ -309,17 +325,33 @@ public class Car : MonoBehaviour {
 		AxleRear.TireLeft.FrictionForce = Mathf.Clamp(-CornerStiffnessRear * AxleRear.SlipAngle, -AxleRear.TireLeft.Grip, AxleRear.TireLeft.Grip) * AxleRear.TireLeft.ActiveWeight;
 		AxleRear.TireRight.FrictionForce = Mathf.Clamp(-CornerStiffnessRear * AxleRear.SlipAngle, -AxleRear.TireRight.Grip, AxleRear.TireRight.Grip) * AxleRear.TireRight.ActiveWeight;
 
-	 	// Forces
+	 	// Forces (longitudinal and lateral)
 		float tractionForceX = AxleRear.Torque - activeBrake * Mathf.Sign(LocalVelocity.x);
 		float tractionForceY = 0;
 
 		float dragForceX = -RollingResistance * LocalVelocity.x - AirResistance * LocalVelocity.x * Mathf.Abs(LocalVelocity.x);
 		float dragForceY = -RollingResistance * LocalVelocity.y - AirResistance * LocalVelocity.y * Mathf.Abs(LocalVelocity.y);
 
-		float totalForceX = dragForceX + tractionForceX;
-		float totalForceY = dragForceY + tractionForceY + Mathf.Cos (SteerAngle) * AxleFront.FrictionForce + AxleRear.FrictionForce;
+		// --- Kinematic vs Dynamic blending
+		// dynamicBlend: 0 => pure kinematic bicycle model; 1 => pure dynamic (shoes/tyres)
+		float dynamicBlend = Mathf.Clamp01((AbsoluteVelocity - KinematicModeSpeed) / KinematicBlendRange);
+		debugDynamicBlend = dynamicBlend;
 
-		//adjust Y force so it levels out the car heading at high speeds
+		// Compute kinematic yaw rate (bicycle model): yawRate = v / L * tan(delta)
+		// Use forward speed (local x). If near zero, yawRate small automatically.
+		float yawRateKinematic = 0f;
+		if (Mathf.Abs(LocalVelocity.x) > 0.01f) {
+			yawRateKinematic = (LocalVelocity.x / WheelBase) * Mathf.Tan (SteerAngle);
+		}
+		debugYawRateKinematic = yawRateKinematic;
+
+		// Average lateral friction per axle, then scale by blend
+		float frontFrictionAvg = (AxleFront.TireLeft.FrictionForce + AxleFront.TireRight.FrictionForce) * 0.5f * dynamicBlend;
+		float rearFrictionAvg = (AxleRear.TireLeft.FrictionForce + AxleRear.TireRight.FrictionForce) * 0.5f * dynamicBlend;
+
+		float totalForceY = dragForceY + tractionForceY + Mathf.Cos (SteerAngle) * frontFrictionAvg + rearFrictionAvg;
+
+		// adjust Y force so it levels out the car heading at high speeds
 		if (AbsoluteVelocity > 10) {
 			totalForceY *= (AbsoluteVelocity + 1) / (21f - SpeedTurningStability);
 		}
@@ -342,31 +374,22 @@ public class Car : MonoBehaviour {
 
 		AbsoluteVelocity = Velocity.magnitude;
 
-		// Angular torque of car
-		float angularTorque = (AxleFront.FrictionForce * AxleFront.DistanceToCG) - (AxleRear.FrictionForce * AxleRear.DistanceToCG);
+		// Angular torque of car - use the *scaled* axle lateral forces (frontFrictionAvg, rearFrictionAvg)
+		float angularTorque = (frontFrictionAvg * AxleFront.DistanceToCG) - (rearFrictionAvg * AxleRear.DistanceToCG);
 
-		// Car will drift away at low speeds
-		if (AbsoluteVelocity < 0.5f && activeThrottle == 0)
-		{
-			LocalAcceleration = Vector2.zero;
-			AbsoluteVelocity = 0;
-			Velocity = Vector2.zero;
-			angularTorque = 0;
-			AngularVelocity = 0;
-			Acceleration = Vector2.zero;
-			Rigidbody2D.angularVelocity = 0;
-		}
-
+		// Compute dynamic angular acceleration and update AngularVelocity
 		var angularAcceleration = angularTorque / Inertia;
-
-		// Update 
 		AngularVelocity += angularAcceleration * Time.deltaTime;
 
-		// Simulation likes to calculate high angular velocity at very low speeds - adjust for this
-		if (AbsoluteVelocity < 1 && Mathf.Abs (SteerAngle) < 0.05f) {
-			AngularVelocity = 0;
-		} else if (SpeedKilometersPerHour < 0.75f) {
-			AngularVelocity = 0;
+		// Blend angular velocity between kinematic yaw rate and dynamic AngularVelocity
+		AngularVelocity = Mathf.Lerp(yawRateKinematic, AngularVelocity, dynamicBlend);
+
+		// Avoid high computed angular velocities at very low speeds by damping (not hard zero)
+		if (AbsoluteVelocity < 0.5f && activeThrottle == 0) {
+			// demp small residual motion instead of chopping to zero
+			Velocity = Vector2.Lerp(Velocity, Vector2.zero, 5f * Time.deltaTime);
+			AngularVelocity = Mathf.Lerp(AngularVelocity, 0f, 5f * Time.deltaTime);
+			Acceleration = Vector2.Lerp(Acceleration, Vector2.zero, 5f * Time.deltaTime);
 		}
 
 		HeadingAngle += AngularVelocity * Time.deltaTime;
@@ -439,6 +462,37 @@ public class Car : MonoBehaviour {
             GUI.Label(new Rect(5, 525, 300, 20), "AxleF Torque: " + AxleFront.Torque.ToString());
             GUI.Label(new Rect(5, 545, 300, 20), "AxleR Torque: " + AxleRear.Torque.ToString());
         }
+	}
+
+	// Debug draw: slip vectors, velocity and blend indicator
+	void OnDrawGizmosSelected() {
+		if (AxleFront == null || AxleRear == null || Rigidbody2D == null) return;
+
+		// Wheel positions
+		Vector3 fl = AxleFront.TireLeft.transform.position;
+		Vector3 fr = AxleFront.TireRight.transform.position;
+		Vector3 rl = AxleRear.TireLeft.transform.position;
+		Vector3 rr = AxleRear.TireRight.transform.position;
+
+		// Draw velocity vector (world)
+		Gizmos.color = Color.cyan;
+		Gizmos.DrawLine(transform.position, transform.position + (Vector3)Rigidbody2D.velocity);
+
+		// Draw slip force arrows (scaled)
+		float scale = 0.0005f;
+		Gizmos.color = Color.red;
+		Gizmos.DrawLine(fl, fl + transform.up * AxleFront.TireLeft.FrictionForce * scale);
+		Gizmos.DrawLine(fr, fr + transform.up * AxleFront.TireRight.FrictionForce * scale);
+		Gizmos.DrawLine(rl, rl + transform.up * AxleRear.TireLeft.FrictionForce * scale);
+		Gizmos.DrawLine(rr, rr + transform.up * AxleRear.TireRight.FrictionForce * scale);
+
+		// Draw forward vector at CG
+		Gizmos.color = Color.green;
+		Gizmos.DrawLine(transform.position, transform.position + transform.up * 1.0f);
+
+		#if UNITY_EDITOR
+		UnityEditor.Handles.Label(transform.position + Vector3.up * 1.2f, $"blend: {debugDynamicBlend:F2}  yawK: {debugYawRateKinematic:F3}");
+		#endif
 	}
 
 }
