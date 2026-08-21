@@ -11,20 +11,31 @@ public class Engine : MonoBehaviour {
 
 	public int CurrentGear { get; private set; }
 
+	// --- new explicit fields
+	[SerializeField]
+	float WheelRadius = 0.5f; // m, можно устанавливать через инспектор или брать из Tire
+
+	[SerializeField]
+	float FinalDrive = 4.2f; // если у тебя последний элемент GearRatios был final drive, вынеси его сюда
+
+	[SerializeField]
+	float RPMLimit = 7500f; // простой limiter, можно доработать
+
 	public float GearRatio {
 		get { return GearRatios[CurrentGear]; }
 	}
 
 	public float EffectiveGearRatio {
-		get { return GearRatios[GearRatios.GetLength(0) - 1]; }
+		get { return FinalDrive; }
 	}
 
 	public void ShiftUp() {
-		CurrentGear++;
+		// Защищаем выход за границы массива
+		CurrentGear = Mathf.Min(CurrentGear + 1, GearRatios.Length - 2);
 	}
 
 	public void ShiftDown() {
-		CurrentGear--;
+		CurrentGear = Mathf.Max(CurrentGear - 1, 0);
 	}
 
 	public float GetTorque(Rigidbody2D rb) {
@@ -32,12 +43,17 @@ public class Engine : MonoBehaviour {
 	}
 
 	public float GetRPM(Rigidbody2D rb) {
-		return rb.velocity.magnitude / (Mathf.PI * 2 / 60f) * (GearRatio * EffectiveGearRatio);
+		// Правильный расчёт RPM: v / (2*pi*r) [rev/sec] -> *60 = rpm, затем * gear * finalDrive
+		float v = rb.velocity.magnitude; // m/s
+		if (WheelRadius <= 0.0001f) WheelRadius = 0.5f;
+		float wheelRevsPerSec = v / (2f * Mathf.PI * WheelRadius); // об/сек
+		float rpm = wheelRevsPerSec * 60f * GearRatio * EffectiveGearRatio;
+		return rpm;
 	}
 
 	public float GetTorque(float rpm)
-	{		
-		if (rpm < 1000) {			
+	{        
+		if (rpm < 1000) {            
 			return Mathf.Lerp (TorqueCurve [0], TorqueCurve [1], rpm / 1000f);
 		} else if (rpm < 2000) {
 			return Mathf.Lerp (TorqueCurve [1], TorqueCurve [2], (rpm - 1000) / 1000f);
@@ -51,8 +67,9 @@ public class Engine : MonoBehaviour {
 			return Mathf.Lerp (TorqueCurve [5], TorqueCurve [6], (rpm - 5000) / 1000f);
 		} else if (rpm < 7000) {
 			return Mathf.Lerp (TorqueCurve [6], TorqueCurve [7], (rpm - 6000) / 1000f);
-		} else {			
-			return TorqueCurve [6];
+		} else {            
+			// Простая логика: выше 7000 — даём сниженный крутящий момент (rev limiter effect)
+			return TorqueCurve [6] * 0.25f;
 		}
 
 	}
@@ -61,7 +78,7 @@ public class Engine : MonoBehaviour {
 		float rpm = GetRPM (rb);
 
 		if (rpm > 6200) {
-			if (CurrentGear < 5)
+			if (CurrentGear < GearRatios.Length - 2)
 				CurrentGear++;
 		} else if (rpm < 2000) {
 			if (CurrentGear > 0)
