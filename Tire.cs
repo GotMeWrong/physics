@@ -1,4 +1,5 @@
 ﻿using UnityEngine;
+using System.Collections.Generic;
 
 public class Tire : MonoBehaviour {
 
@@ -27,7 +28,7 @@ public class Tire : MonoBehaviour {
 			
 			//Fix issue where skidmarks draw at 0,0,0 at slow speeds
 			Skidmark.GetComponent<TrailRenderer>().Clear();
-		} else if (!active && TrailActive) {			
+		} else if (!active && TrailActive) {            
 			Skidmark.transform.parent = null;
 			GameObject.Destroy (Skidmark.gameObject, TrailDuration); 
 		}
